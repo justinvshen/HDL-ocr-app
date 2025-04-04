@@ -130,7 +130,7 @@ function App() {
     return (
       <div style={styles.container}>
         <div style={styles.header}>
-          <h1>Receipt OCR</h1>
+          <h1>HDL Tips</h1>
         </div>
         <div style={styles.content}>
           <p>No receipts or tips detected. Please try again.</p>
@@ -146,7 +146,7 @@ function App() {
     <div style={styles.container}>
       {/* Header */}
       <div style={styles.header}>
-        <h1>Receipt OCR</h1>
+        <h1>HDL Tips</h1>
       </div>
 
       {/* Main Content */}
