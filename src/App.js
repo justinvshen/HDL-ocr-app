@@ -5,29 +5,34 @@ function App() {
   const [ocrResult, setOcrResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [ccData, setCcData] = useState([]);
-  const inputRef = useRef(null);
+  const [noDataFound, setNoDataFound] = useState(false);
 
-  // Initialize a Tesseract.js worker (only once)
+  const inputRef = useRef(null);
   const workerRef = useRef(
     createWorker({
-      logger: (m) => {
-        // Optional: see progress in console
-        // console.log(m);
-      },
+      // Remove or comment out logger to avoid DataCloneErrors
+      // logger: (m) => console.log(m)
     })
   );
 
-  // Simple regex to find currency-ish strings (e.g. $12.34, 12.34, 45, etc.)
   const moneyRegex = /\$?(\d+\.\d{1,2}|\d+)/gim;
 
-  // Handler: open hidden <input> so user can pick or take a photo
+  // If user taps "Start," open hidden file input
   const handleStart = () => {
     if (inputRef.current) {
       inputRef.current.click();
     }
   };
 
-  // Handler: once the user selects/takes an image
+  // Reset to initial state
+  const handleTryAgain = () => {
+    setNoDataFound(false);
+    setOcrResult(null);
+    setCcData([]);
+    setIsLoading(false);
+  };
+
+  // File chosen => do OCR
   const handleFileChange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -35,35 +40,35 @@ function App() {
     setIsLoading(true);
     setOcrResult(null);
     setCcData([]);
+    setNoDataFound(false);
 
-    // 1) Load Tesseract worker (one time only)
     const worker = workerRef.current;
+    try {
     await worker.load();
     await worker.loadLanguage('eng');
     await worker.initialize('eng');
 
-    // 2) Convert file to data URL
+      // Convert file to data URL
     const reader = new FileReader();
     reader.onload = async () => {
       const imageData = reader.result;
-
-      // 3) Do OCR
       try {
         const { data } = await worker.recognize(imageData);
-        const text = data.text;
-
+          const text = data.text || '';
         setOcrResult(text);
 
-        // 4) Parse lines for credit card sales and tips
+          // Parse lines for credit card sales & tips
         const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
 
         let results = [];
         for (let line of lines) {
           const lower = line.toLowerCase();
-          // If line references "credit", "card", "charge" => interpret it as a credit card sale line
-          // If line references "tip" => interpret it as a tip line
-          // We'll capture all money strings from that line
-          if (lower.includes('credit') || lower.includes('card') || lower.includes('charge') || lower.includes('tip')) {
+            if (
+              lower.includes('credit') ||
+              lower.includes('card') ||
+              lower.includes('charge') ||
+              lower.includes('tip')
+            ) {
             const matches = line.match(moneyRegex);
             if (matches) {
               results.push({
@@ -75,7 +80,7 @@ function App() {
           }
         }
 
-        // 5) Build row data from results
+          // Build row data
         let rowData = [];
         results.forEach((r) => {
           r.amounts.forEach((amt) => {
@@ -85,17 +90,29 @@ function App() {
             });
           });
         });
+
         setCcData(rowData);
+
+          // If nothing was found, set noDataFound to true
+          if (rowData.length === 0) {
+            setNoDataFound(true);
+          }
       } catch (err) {
         console.error(err);
+          setNoDataFound(true);
       } finally {
         setIsLoading(false);
       }
     };
     reader.readAsDataURL(file);
+    } catch (err) {
+      console.error(err);
+      setNoDataFound(true);
+      setIsLoading(false);
+    }
   };
 
-  // Compute totals
+  // Calculate totals
   const totalSales = ccData
     .filter((r) => r.type === 'Credit Sale')
     .reduce((acc, curr) => acc + parseFloat(curr.amount), 0);
@@ -104,15 +121,37 @@ function App() {
     .filter((r) => r.type === 'Tip')
     .reduce((acc, curr) => acc + parseFloat(curr.amount), 0);
 
+  // -------------
+  //   RENDER UI
+  // -------------
+
+  // If no data was found
+  if (noDataFound && !isLoading && ccData.length === 0) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.header}>
+          <h1>Receipt OCR</h1>
+        </div>
+        <div style={styles.content}>
+          <p>No receipts or tips detected. Please try again.</p>
+          <button style={styles.startButton} onClick={handleTryAgain}>
+            Try Again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.container}>
-      {/* Simple header bar */}
+      {/* Header */}
       <div style={styles.header}>
-        <h1 style={{ margin: 0 }}>Hai Di Lao Tips</h1>
+        <h1>Receipt OCR</h1>
       </div>
 
-      {/* Main content: "Start" button or results */}
+      {/* Main Content */}
       <div style={styles.content}>
+        {/* Show Start button if no data yet */}
         {!ocrResult && !isLoading && ccData.length === 0 && (
           <button style={styles.startButton} onClick={handleStart}>
             Start
@@ -129,10 +168,10 @@ function App() {
           onChange={handleFileChange}
         />
 
-        {/* Loading indicator */}
+        {/* Loading... */}
         {isLoading && <p>Processing image, please wait...</p>}
 
-        {/* Show table if we have ccData */}
+        {/* Show table if we have data */}
         {ccData.length > 0 && (
           <div style={styles.tableWrapper}>
             <h2>Parsed Results</h2>
@@ -150,7 +189,6 @@ function App() {
                     <td style={styles.td}>${row.amount}</td>
                   </tr>
                 ))}
-                {/* Totals row */}
                 <tr>
                   <td style={styles.td}><strong>Total Sales</strong></td>
                   <td style={styles.td}><strong>${totalSales.toFixed(2)}</strong></td>
@@ -168,7 +206,7 @@ function App() {
   );
 }
 
-// Inline styles for simplicity
+// Inline styles
 const styles = {
   container: {
     fontFamily: 'sans-serif',
@@ -190,6 +228,7 @@ const styles = {
     flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
+    padding: '1rem'
   },
   startButton: {
     fontSize: '1rem',
