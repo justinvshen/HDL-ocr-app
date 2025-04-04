@@ -108,7 +108,7 @@ function App() {
     <div style={styles.container}>
       {/* Simple header bar */}
       <div style={styles.header}>
-        <h1 style={{ margin: 0 }}>Receipt OCR</h1>
+        <h1 style={{ margin: 0 }}>Hai Di Lao Tips</h1>
       </div>
 
       {/* Main content: "Start" button or results */}
