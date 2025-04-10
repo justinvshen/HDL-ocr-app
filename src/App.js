@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
 
 /* ----------  TESSERACT WORKER CONFIG  ---------- */
