@@ -1,51 +1,52 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
 
+/* ----------  TESSERACT WORKER CONFIG  ---------- */
+const CDN = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/'; // public files
 const worker = createWorker({
-  // no logger => avoids DataCloneError
+  workerPath: `${CDN}worker.min.js`,
+  corePath:   `${CDN}tesseract-core.wasm.js`,
+  langPath:   `${CDN}lang/`,
+  // logger: (m) => console.log(m),   // optional progress
 });
 
 export default function App() {
-  const [isReady, setIsReady]   = useState(false);   // worker ready?
-  const [isLoading, setLoading] = useState(false);   // doing OCR?
+  const [isReady, setIsReady]   = useState(false);   // OCR engine loaded?
+  const [isLoading, setLoading] = useState(false);   // OCR in progress?
   const [rows, setRows]         = useState([]);      // [{sale, tip}]
   const [error, setError]       = useState(null);    // null | string
   const inputRef                = useRef(null);
 
-  /* ----------  INITIALISE TESSERACT WORKER ONCE ---------- */
+  /* ----------  INITIALISE WORKER ONCE  ---------- */
   useEffect(() => {
     (async () => {
+      try {
       await worker.load();
       await worker.loadLanguage('eng');
       await worker.initialize('eng');
       setIsReady(true);
+      } catch (err) {
+        console.error('Tesseract failed to load', err);
+        setError('OCR engine failed to load. Check your connection and refresh.');
+      }
     })();
-    return () => { worker.terminate(); };            // cleanup on unmount
+    return () => { worker.terminate(); };
   }, []);
 
   /* ----------  HELPERS  ---------- */
-  const moneyToFloat = (s) =>
-    parseFloat(s.replace(/[$,]/g, '').trim() || '0');
+  const moneyToFloat = (s) => parseFloat(s.replace(/[$,]/g, '').trim() || '0');
 
   const extractSummaryLines = (text) => {
-    /* 
-       We look for:
-          Total   US$ 12.34
-          Tip     US$  3.00
-       We allow arbitrary spaces, tabs, and case.
-    */
+    // Look for "Total  US$ 12.34" and "Tip  US$ 3.00"
     const totalRegex = /total\s*us\$?\s*([\d,.]+\.\d{2})/gi;
     const tipRegex   = /tip\s*us\$?\s*([\d,.]+\.\d{2})/gi;
 
     const totals = [...text.matchAll(totalRegex)].map((m) => moneyToFloat(m[1]));
     const tips   = [...text.matchAll(tipRegex)].map((m) => moneyToFloat(m[1]));
 
-    /* Pair them in the order they appear. If counts differ, pair up to min. */
     const n = Math.min(totals.length, tips.length);
     const pairs = [];
-    for (let i = 0; i < n; i++) {
-      pairs.push({ sale: totals[i], tip: tips[i] });
-    }
+    for (let i = 0; i < n; i++) pairs.push({ sale: totals[i], tip: tips[i] });
     return pairs;
   };
 
@@ -54,9 +55,7 @@ export default function App() {
     const file = e.target.files[0];
     if (!file) return;
 
-    setRows([]);
-    setError(null);
-    setLoading(true);
+    setRows([]); setError(null); setLoading(true);
 
     try {
       const dataURL = await new Promise((res) => {
@@ -66,26 +65,24 @@ export default function App() {
       });
 
       const { data } = await worker.recognize(dataURL);
-          const text = data.text || '';
+      const pairs = extractSummaryLines(data.text || '');
 
-      const summaryRows = extractSummaryLines(text);
-
-      if (summaryRows.length === 0) {
-        setError('No summary “Total/Tip” lines found – please try again.');
+      if (pairs.length === 0) {
+        setError('No summary “Total / Tip” lines found – please try again.');
       } else {
-        setRows(summaryRows);
+        setRows(pairs);
       }
     } catch (err) {
       console.error(err);
       setError('Something went wrong – please try again.');
     } finally {
       setLoading(false);
-      /* reset file input so the same file can be chosen again */
-      if (inputRef.current) inputRef.current.value = '';
+      if (inputRef.current) inputRef.current.value = ''; // allow same file again
     }
   };
 
-  const handleStart = () => inputRef.current?.click();
+  /* ----------  UI ACTIONS  ---------- */
+  const handleStart    = () => inputRef.current?.click();
   const handleTryAgain = () => { setRows([]); setError(null); };
 
   /* ----------  TOTALS  ---------- */
@@ -98,7 +95,7 @@ export default function App() {
       <header style={styles.header}><h1>HDL Tips</h1></header>
 
       <main style={styles.content}>
-        {!isReady && <p>Loading OCR engine…</p>}
+        {!isReady && !error && <p>Loading OCR engine…</p>}
 
         {isReady && rows.length === 0 && !isLoading && !error && (
           <button style={styles.btn} onClick={handleStart}>Start</button>
