@@ -1,17 +1,19 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { createWorker } from 'tesseract.js';
 
 /* ----------  TESSERACT WORKER CONFIG  ---------- */
 const worker = createWorker({
-  logger: (m) => console.log(m),   // optional progress
+  // Remove or comment out logger to avoid DataCloneErrors
+  // logger: (m) => console.log(m)
 });
 
 export default function App() {
-  const [isReady, setIsReady]   = useState(false);   // OCR engine loaded?
-  const [isLoading, setLoading] = useState(false);   // OCR in progress?
-  const [rows, setRows]         = useState([]);      // [{sale, tip}]
-  const [error, setError]       = useState(null);    // null | string
-  const inputRef                = useRef(null);
+  const [ocrResult, setOcrResult] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [ccData, setCcData] = useState([]);
+  const [noDataFound, setNoDataFound] = useState(false);
+
+  const inputRef = useRef(null);
 
   /* ----------  INITIALISE WORKER ONCE  ---------- */
   useEffect(() => {
@@ -20,10 +22,8 @@ export default function App() {
       await worker.load();
       await worker.loadLanguage('eng');
       await worker.initialize('eng');
-      setIsReady(true);
       } catch (err) {
         console.error('Tesseract failed to load', err);
-        setError('OCR engine failed to load. Check your connection and refresh.');
       }
     })();
     return () => { worker.terminate(); };
@@ -32,26 +32,15 @@ export default function App() {
   /* ----------  HELPERS  ---------- */
   const moneyToFloat = (s) => parseFloat(s.replace(/[$,]/g, '').trim() || '0');
 
-  const extractSummaryLines = (text) => {
-    // Look for "Total  US$ 12.34" and "Tip  US$ 3.00"
-    const totalRegex = /total\s*us\$?\s*([\d,.]+\.\d{2})/gi;
-    const tipRegex   = /tip\s*us\$?\s*([\d,.]+\.\d{2})/gi;
-
-    const totals = [...text.matchAll(totalRegex)].map((m) => moneyToFloat(m[1]));
-    const tips   = [...text.matchAll(tipRegex)].map((m) => moneyToFloat(m[1]));
-
-    const n = Math.min(totals.length, tips.length);
-    const pairs = [];
-    for (let i = 0; i < n; i++) pairs.push({ sale: totals[i], tip: tips[i] });
-    return pairs;
-  };
-
   /* ----------  FILE HANDLER  ---------- */
   const handleFileChange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    setRows([]); setError(null); setLoading(true);
+    setIsLoading(true);
+    setOcrResult(null);
+    setCcData([]);
+    setNoDataFound(false);
 
     try {
       const dataURL = await new Promise((res) => {
@@ -61,73 +50,170 @@ export default function App() {
       });
 
       const { data } = await worker.recognize(dataURL);
-      const pairs = extractSummaryLines(data.text || '');
+      const text = data.text || '';
+      setOcrResult(text);
 
-      if (pairs.length === 0) {
-        setError('No summary “Total / Tip” lines found – please try again.');
+      // Look for "Total US$ 12.34" and "Tip US$ 3.00"
+      const totalRegex = /total\s*us\$?\s*([\d,.]+\.\d{2})/gi;
+      const tipRegex = /tip\s*us\$?\s*([\d,.]+\.\d{2})/gi;
+
+      const totals = [...text.matchAll(totalRegex)].map((m) => moneyToFloat(m[1]));
+      const tips = [...text.matchAll(tipRegex)].map((m) => moneyToFloat(m[1]));
+
+      // If we found matches with the US$ format regex
+      if (totals.length > 0 || tips.length > 0) {
+        // Build pairs of sales and tips
+        const n = Math.max(totals.length, tips.length);
+        let rowData = [];
+        
+        for (let i = 0; i < n; i++) {
+          // If we have a total, add it
+          if (i < totals.length) {
+            rowData.push({
+              type: 'Credit Sale',
+              amount: totals[i].toFixed(2),
+            });
+          }
+          
+          // If we have a tip, add it
+          if (i < tips.length) {
+            rowData.push({
+              type: 'Tip',
+              amount: tips[i].toFixed(2),
+            });
+          }
+        }
+        
+        setCcData(rowData);
       } else {
-        setRows(pairs);
+        // Fallback to the original money regex if US$ format not found
+        const moneyRegex = /\$?(\d+\.\d{1,2}|\d+)/gim;
+        const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+
+        let results = [];
+        for (let line of lines) {
+          const lower = line.toLowerCase();
+          if (
+            lower.includes('credit') ||
+            lower.includes('card') ||
+            lower.includes('charge') ||
+            lower.includes('tip')
+          ) {
+            const matches = line.match(moneyRegex);
+            if (matches) {
+              results.push({
+                lineText: line,
+                amounts: matches.map((m) => parseFloat(m.replace('$', ''))),
+                isTipLine: lower.includes('tip'),
+              });
+            }
+          }
+        }
+
+        // Build row data
+        let rowData = [];
+        results.forEach((r) => {
+          r.amounts.forEach((amt) => {
+            rowData.push({
+              type: r.isTipLine ? 'Tip' : 'Credit Sale',
+              amount: amt.toFixed(2),
+            });
+          });
+        });
+
+        setCcData(rowData);
+      }
+
+      // If nothing was found, set noDataFound to true
+      if (ccData.length === 0) {
+        setNoDataFound(true);
       }
     } catch (err) {
       console.error(err);
-      setError('Something went wrong – please try again.');
+      setNoDataFound(true);
     } finally {
-      setLoading(false);
+      setIsLoading(false);
       if (inputRef.current) inputRef.current.value = ''; // allow same file again
     }
   };
 
   /* ----------  UI ACTIONS  ---------- */
-  const handleStart    = () => inputRef.current?.click();
-  const handleTryAgain = () => { setRows([]); setError(null); };
+  const handleStart = () => {
+    if (inputRef.current) {
+      inputRef.current.click();
+    }
+  };
+
+  const handleTryAgain = () => {
+    setNoDataFound(false);
+    setOcrResult(null);
+    setCcData([]);
+    setIsLoading(false);
+  };
 
   /* ----------  TOTALS  ---------- */
-  const totalSales = rows.reduce((a, r) => a + r.sale, 0);
-  const totalTips  = rows.reduce((a, r) => a + r.tip,  0);
+  const totalSales = ccData
+    .filter((r) => r.type === 'Credit Sale')
+    .reduce((acc, curr) => acc + parseFloat(curr.amount), 0);
+
+  const totalTips = ccData
+    .filter((r) => r.type === 'Tip')
+    .reduce((acc, curr) => acc + parseFloat(curr.amount), 0);
 
   /* ----------  RENDER  ---------- */
+  if (noDataFound && !isLoading && ccData.length === 0) {
+    return (
+      <div style={styles.container}>
+        <div style={styles.header}>
+          <h1>Receipt OCR</h1>
+        </div>
+        <div style={styles.content}>
+          <p>No receipts or tips detected. Please try again.</p>
+          <button style={styles.startButton} onClick={handleTryAgain}>
+            Try Again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.container}>
-      <header style={styles.header}><h1>HDL Tips</h1></header>
+      <header style={styles.header}><h1>HDL Tips</h1></header>
 
       <main style={styles.content}>
-        {!isReady && !error && <p>Loading OCR engine…</p>}
-
-        {isReady && rows.length === 0 && !isLoading && !error && (
+        {!ocrResult && !isLoading && ccData.length === 0 && (
           <button style={styles.btn} onClick={handleStart}>Start</button>
         )}
 
         {isLoading && <p>Processing image, please wait…</p>}
 
-        {error && (
-          <>
-            <p>{error}</p>
-            <button style={styles.btn} onClick={handleTryAgain}>Try Again</button>
-          </>
-        )}
-
-        {rows.length > 0 && (
+        {ccData.length > 0 && (
           <div style={styles.tableWrap}>
             <h2>Parsed Results</h2>
             <table style={styles.table}>
               <thead>
-                <tr><th>Sale (US$)</th><th>Tip (US$)</th></tr>
+                <tr><th>Type</th><th>Amount</th></tr>
               </thead>
               <tbody>
-                {rows.map((r,i)=>(
+                {ccData.map((r,i)=>(
                   <tr key={i}>
-                    <td>${r.sale.toFixed(2)}</td>
-                    <td>${r.tip.toFixed(2)}</td>
+                    <td>{r.type}</td>
+                    <td>${r.amount}</td>
                   </tr>
                 ))}
                 <tr style={{fontWeight:'bold'}}>
-                  <td>${totalSales.toFixed(2)}</td>
-                  <td>${totalTips.toFixed(2)}</td>
+                  <td><strong>Total Sales</strong></td>
+                  <td><strong>${totalSales.toFixed(2)}</strong></td>
+                </tr>
+                <tr style={{fontWeight:'bold'}}>
+                  <td><strong>Total Tips</strong></td>
+                  <td><strong>${totalTips.toFixed(2)}</strong></td>
                 </tr>
               </tbody>
             </table>
             <button style={{...styles.btn, marginTop:'1rem'}} onClick={handleTryAgain}>
-              Scan Another Photo
+              Scan Another Receipt
             </button>
           </div>
         )}
