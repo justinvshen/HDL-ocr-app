@@ -129,7 +129,7 @@ export default function App() {
                 ))}
                 <tr style={{fontWeight:'bold'}}>
                   <td>${totalSales.toFixed(2)}</td>
-                  <td>${totalTips .toFixed(2)}</td>
+                  <td>${totalTips.toFixed(2)}</td>
                 </tr>
               </tbody>
             </table>
