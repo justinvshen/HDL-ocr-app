@@ -2,12 +2,8 @@ import React, { useState, useRef, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
 
 /* ----------  TESSERACT WORKER CONFIG  ---------- */
-const CDN = 'https://cdn.jsdelivr.net/npm/tesseract.js@6/dist/'; // public files
 const worker = createWorker({
-  workerPath: `${CDN}worker.min.js`,
-  corePath:   `${CDN}tesseract-core.wasm.js`,
-  langPath:   `${CDN}lang/`,
-  // logger: (m) => console.log(m),   // optional progress
+  logger: (m) => console.log(m),   // optional progress
 });
 
 export default function App() {
