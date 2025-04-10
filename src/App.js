@@ -1,266 +1,165 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { createWorker } from 'tesseract.js';
 
-function App() {
-  const [ocrResult, setOcrResult] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [ccData, setCcData] = useState([]);
-  const [noDataFound, setNoDataFound] = useState(false);
+const worker = createWorker({
+  // no logger => avoids DataCloneError
+});
 
-  const inputRef = useRef(null);
-  const workerRef = useRef(
-    createWorker({
-      // Remove or comment out logger to avoid DataCloneErrors
-      // logger: (m) => console.log(m)
-    })
-  );
+export default function App() {
+  const [isReady, setIsReady]   = useState(false);   // worker ready?
+  const [isLoading, setLoading] = useState(false);   // doing OCR?
+  const [rows, setRows]         = useState([]);      // [{sale, tip}]
+  const [error, setError]       = useState(null);    // null | string
+  const inputRef                = useRef(null);
 
-  const moneyRegex = /\$?(\d+\.\d{1,2}|\d+)/gim;
+  /* ----------  INITIALISE TESSERACT WORKER ONCE ---------- */
+  useEffect(() => {
+    (async () => {
+      await worker.load();
+      await worker.loadLanguage('eng');
+      await worker.initialize('eng');
+      setIsReady(true);
+    })();
+    return () => { worker.terminate(); };            // cleanup on unmount
+  }, []);
 
-  // If user taps "Start," open hidden file input
-  const handleStart = () => {
-    if (inputRef.current) {
-      inputRef.current.click();
+  /* ----------  HELPERS  ---------- */
+  const moneyToFloat = (s) =>
+    parseFloat(s.replace(/[$,]/g, '').trim() || '0');
+
+  const extractSummaryLines = (text) => {
+    /* 
+       We look for:
+          Total   US$ 12.34
+          Tip     US$  3.00
+       We allow arbitrary spaces, tabs, and case.
+    */
+    const totalRegex = /total\s*us\$?\s*([\d,.]+\.\d{2})/gi;
+    const tipRegex   = /tip\s*us\$?\s*([\d,.]+\.\d{2})/gi;
+
+    const totals = [...text.matchAll(totalRegex)].map((m) => moneyToFloat(m[1]));
+    const tips   = [...text.matchAll(tipRegex)].map((m) => moneyToFloat(m[1]));
+
+    /* Pair them in the order they appear. If counts differ, pair up to min. */
+    const n = Math.min(totals.length, tips.length);
+    const pairs = [];
+    for (let i = 0; i < n; i++) {
+      pairs.push({ sale: totals[i], tip: tips[i] });
     }
+    return pairs;
   };
 
-  // Reset to initial state
-  const handleTryAgain = () => {
-    setNoDataFound(false);
-    setOcrResult(null);
-    setCcData([]);
-    setIsLoading(false);
-  };
-
-  // File chosen => do OCR
+  /* ----------  FILE HANDLER  ---------- */
   const handleFileChange = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    setIsLoading(true);
-    setOcrResult(null);
-    setCcData([]);
-    setNoDataFound(false);
+    setRows([]);
+    setError(null);
+    setLoading(true);
 
-    const worker = workerRef.current;
     try {
-    await worker.load();
-    await worker.loadLanguage('eng');
-    await worker.initialize('eng');
+      const dataURL = await new Promise((res) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.readAsDataURL(file);
+      });
 
-      // Convert file to data URL
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const imageData = reader.result;
-      try {
-        const { data } = await worker.recognize(imageData);
+      const { data } = await worker.recognize(dataURL);
           const text = data.text || '';
-        setOcrResult(text);
 
-          // Parse lines for credit card sales & tips
-        const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+      const summaryRows = extractSummaryLines(text);
 
-        let results = [];
-        for (let line of lines) {
-          const lower = line.toLowerCase();
-            if (
-              lower.includes('credit') ||
-              lower.includes('card') ||
-              lower.includes('charge') ||
-              lower.includes('tip')
-            ) {
-            const matches = line.match(moneyRegex);
-            if (matches) {
-              results.push({
-                lineText: line,
-                amounts: matches.map((m) => parseFloat(m.replace('$', ''))),
-                isTipLine: lower.includes('tip'),
-              });
-            }
-          }
-        }
-
-          // Build row data
-        let rowData = [];
-        results.forEach((r) => {
-          r.amounts.forEach((amt) => {
-            rowData.push({
-              type: r.isTipLine ? 'Tip' : 'Credit Sale',
-              amount: amt.toFixed(2),
-            });
-          });
-        });
-
-        setCcData(rowData);
-
-          // If nothing was found, set noDataFound to true
-          if (rowData.length === 0) {
-            setNoDataFound(true);
-          }
-      } catch (err) {
-        console.error(err);
-          setNoDataFound(true);
-      } finally {
-        setIsLoading(false);
+      if (summaryRows.length === 0) {
+        setError('No summary “Total/Tip” lines found – please try again.');
+      } else {
+        setRows(summaryRows);
       }
-    };
-    reader.readAsDataURL(file);
     } catch (err) {
       console.error(err);
-      setNoDataFound(true);
-      setIsLoading(false);
+      setError('Something went wrong – please try again.');
+    } finally {
+      setLoading(false);
+      /* reset file input so the same file can be chosen again */
+      if (inputRef.current) inputRef.current.value = '';
     }
   };
 
-  // Calculate totals
-  const totalSales = ccData
-    .filter((r) => r.type === 'Credit Sale')
-    .reduce((acc, curr) => acc + parseFloat(curr.amount), 0);
+  const handleStart = () => inputRef.current?.click();
+  const handleTryAgain = () => { setRows([]); setError(null); };
 
-  const totalTips = ccData
-    .filter((r) => r.type === 'Tip')
-    .reduce((acc, curr) => acc + parseFloat(curr.amount), 0);
+  /* ----------  TOTALS  ---------- */
+  const totalSales = rows.reduce((a, r) => a + r.sale, 0);
+  const totalTips  = rows.reduce((a, r) => a + r.tip,  0);
 
-  // -------------
-  //   RENDER UI
-  // -------------
-
-  // If no data was found
-  if (noDataFound && !isLoading && ccData.length === 0) {
-    return (
-      <div style={styles.container}>
-        <div style={styles.header}>
-          <h1>HDL Tips</h1>
-        </div>
-        <div style={styles.content}>
-          <p>No receipts or tips detected. Please try again.</p>
-          <button style={styles.startButton} onClick={handleTryAgain}>
-            Try Again
-          </button>
-        </div>
-      </div>
-    );
-  }
-
+  /* ----------  RENDER  ---------- */
   return (
     <div style={styles.container}>
-      {/* Header */}
-      <div style={styles.header}>
-        <h1>HDL Tips</h1>
-      </div>
+      <header style={styles.header}><h1>HDL Tips</h1></header>
 
-      {/* Main Content */}
-      <div style={styles.content}>
-        {/* Show Start button if no data yet */}
-        {!ocrResult && !isLoading && ccData.length === 0 && (
-          <button style={styles.startButton} onClick={handleStart}>
-            Start
-          </button>
+      <main style={styles.content}>
+        {!isReady && <p>Loading OCR engine…</p>}
+
+        {isReady && rows.length === 0 && !isLoading && !error && (
+          <button style={styles.btn} onClick={handleStart}>Start</button>
         )}
 
-        {/* Hidden file input */}
-        <input
-          type="file"
-          accept="image/*"
-          capture="environment"
-          ref={inputRef}
-          style={{ display: 'none' }}
-          onChange={handleFileChange}
-        />
+        {isLoading && <p>Processing image, please wait…</p>}
 
-        {/* Loading... */}
-        {isLoading && <p>Processing image, please wait...</p>}
+        {error && (
+          <>
+            <p>{error}</p>
+            <button style={styles.btn} onClick={handleTryAgain}>Try Again</button>
+          </>
+        )}
 
-        {/* Show table if we have data */}
-        {ccData.length > 0 && (
-          <div style={styles.tableWrapper}>
+        {rows.length > 0 && (
+          <div style={styles.tableWrap}>
             <h2>Parsed Results</h2>
             <table style={styles.table}>
               <thead>
-                <tr>
-                  <th style={styles.th}>Type</th>
-                  <th style={styles.th}>Amount</th>
-                </tr>
+                <tr><th>Sale (US$)</th><th>Tip (US$)</th></tr>
               </thead>
               <tbody>
-                {ccData.map((row, index) => (
-                  <tr key={index}>
-                    <td style={styles.td}>{row.type}</td>
-                    <td style={styles.td}>${row.amount}</td>
+                {rows.map((r,i)=>(
+                  <tr key={i}>
+                    <td>${r.sale.toFixed(2)}</td>
+                    <td>${r.tip.toFixed(2)}</td>
                   </tr>
                 ))}
-                <tr>
-                  <td style={styles.td}><strong>Total Sales</strong></td>
-                  <td style={styles.td}><strong>${totalSales.toFixed(2)}</strong></td>
-                </tr>
-                <tr>
-                  <td style={styles.td}><strong>Total Tips</strong></td>
-                  <td style={styles.td}><strong>${totalTips.toFixed(2)}</strong></td>
+                <tr style={{fontWeight:'bold'}}>
+                  <td>${totalSales.toFixed(2)}</td>
+                  <td>${totalTips .toFixed(2)}</td>
                 </tr>
               </tbody>
             </table>
+            <button style={{...styles.btn, marginTop:'1rem'}} onClick={handleTryAgain}>
+              Scan Another Photo
+            </button>
           </div>
         )}
-      </div>
+
+        {/* hidden file input */}
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          style={{display:'none'}}
+          onChange={handleFileChange}
+        />
+      </main>
     </div>
   );
 }
 
-// Inline styles
+/* ----------  STYLES  ---------- */
 const styles = {
-  container: {
-    fontFamily: 'sans-serif',
-    backgroundColor: '#fefefe',
-    height: '100vh',
-    margin: 0,
-    display: 'flex',
-    flexDirection: 'column',
-  },
-  header: {
-    backgroundColor: '#333',
-    color: '#fff',
-    padding: '1rem',
-    textAlign: 'center',
-  },
-  content: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: '1rem'
-  },
-  startButton: {
-    fontSize: '1rem',
-    padding: '1rem 2rem',
-    borderRadius: '8px',
-    border: 'none',
-    backgroundColor: '#28a745',
-    color: '#fff',
-    cursor: 'pointer',
-  },
-  tableWrapper: {
-    width: '80%',
-    maxWidth: '600px',
-    margin: '2rem auto',
-    backgroundColor: '#fff',
-    borderRadius: '8px',
-    padding: '1rem',
-    boxShadow: '0px 2px 5px rgba(0,0,0,0.2)',
-  },
-  table: {
-    width: '100%',
-    borderCollapse: 'collapse',
-  },
-  th: {
-    borderBottom: '2px solid #ccc',
-    textAlign: 'left',
-    padding: '0.5rem',
-  },
-  td: {
-    borderBottom: '1px solid #eee',
-    padding: '0.5rem',
-  },
+  container:{fontFamily:'sans-serif',height:'100vh',display:'flex',flexDirection:'column'},
+  header:{background:'#333',color:'#fff',padding:'1rem',textAlign:'center'},
+  content:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'1rem'},
+  btn:{padding:'1rem 2rem',border:'none',borderRadius:'8px',background:'#28a745',color:'#fff',fontSize:'1rem',cursor:'pointer'},
+  tableWrap:{width:'90%',maxWidth:'600px',background:'#fff',padding:'1rem',borderRadius:'8px',
+             boxShadow:'0 2px 5px rgba(0,0,0,.2)'},
+  table:{width:'100%',borderCollapse:'collapse'},
 };
-
-export default App;
